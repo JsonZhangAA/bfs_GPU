@@ -1,4 +1,5 @@
 /* Copyright 2018 Stanford, UT Austin, LANL
+ *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
  * You may obtain a copy of the License at
@@ -12,7 +13,7 @@
  * limitations under the License.
  */
 
-#include "../core/graph.h" 
+#include "../core/graph.h"
 #include "../core/cuda_helper.h"
 #include "realm/runtime_impl.h"
 #include "realm/cuda/cuda_module.h"
@@ -44,7 +45,7 @@ void load_kernel(V_ID my_in_vtxs,
     cub::ThreadStore<cub::STORE_CG>(old_pr_fb + vtx, my_pr);
   }
 }
-                                        
+
 __global__
 void pr_kernel(V_ID rowLeft,
                V_ID rowRight,
@@ -53,42 +54,51 @@ void pr_kernel(V_ID rowLeft,
                const NodeStruct* row_ptrs,
                const EdgeStruct* col_idxs,
                Vertex* old_pr_fb,
-               Vertex* new_pr_fb,int level,int *distance, int *d_parent,int *  queueSize, int *nextQueueSize, int *d_currentQueue, int *d_nextQueue)
+               Vertex* new_pr_fb)
 {
   typedef cub::BlockScan<E_ID, CUDA_NUM_THREADS> BlockScan;
   __shared__ BlockScan::TempStorage temp_storage;
-  //__shared__ bool visited[]
   //__shared__ float pr[CUDA_NUM_THREADS];
   __shared__ E_ID blkColStart;
-    V_ID curVtx = blockIdx.x*blockDim.x+threadIdx.x;
-    if(curVtx <=*queueSize) 
-    {
-      int valueChange=0;
-      int u=d_currentQueue[curVtx];
-      {
-         
-          int i=0;
-          if(u==0)
-            i=0;
-          else
-            i=row_ptrs[u-1].index;  
-          for (; i < row_ptrs[u].index; i++) 
-          {  
-          
-              EdgeStruct es = col_idxs[i];
-              int v=es.dst;
-              if(distance[v] == INT_MAX && atomicMin(&distance[v], level + 1) == INT_MAX)
-             {
-                  d_parent[v]=i;
-                  int position=atomicAdd(nextQueueSize,1);
-                  d_nextQueue[position]=v;
-                  valueChange = 1;
-              }
-             
-          }
+  for (V_ID blkRowStart = blockIdx.x * blockDim.x + rowLeft; blkRowStart <= rowRight;
+       blkRowStart += blockDim.x * gridDim.x)
+  {
+    E_ID myNumEdges = 0, scratchOffset, totalNumEdges = 0;
+    V_ID myDegree = 0;
+    V_ID curVtx = blkRowStart + threadIdx.x;
+    if (curVtx <= rowRight) {
+      NodeStruct ns = row_ptrs[curVtx - rowLeft];
+      E_ID start_col_idx, end_col_idx = ns.index;
+      myDegree = ns.degree;
+      if (curVtx == rowLeft)
+        start_col_idx = colLeft;
+      else
+        start_col_idx = row_ptrs[curVtx - rowLeft - 1].index;
+      myNumEdges = end_col_idx - start_col_idx;
+      if (threadIdx.x == 0)
+        blkColStart = start_col_idx;
+      new_pr_fb[curVtx - rowLeft] = 0;
+    }
+
+    __syncthreads();
+    BlockScan(temp_storage).ExclusiveSum(myNumEdges, scratchOffset, totalNumEdges);
+    E_ID done = 0;
+    while (totalNumEdges > 0) {
+      if (threadIdx.x < totalNumEdges) {
+        EdgeStruct es = col_idxs[blkColStart + done + threadIdx.x - colLeft];
+        float src_pr = old_pr_fb[es.src];
+        atomicAdd(new_pr_fb + es.dst - rowLeft, src_pr);
       }
+      done += CUDA_NUM_THREADS;
+      totalNumEdges -= (totalNumEdges > CUDA_NUM_THREADS) ? 
+                       CUDA_NUM_THREADS : totalNumEdges;
     }
     __syncthreads();
+    float my_pr = initRank + ALPHA * new_pr_fb[curVtx - rowLeft];
+    if (myDegree != 0)
+      my_pr = my_pr / myDegree;
+    new_pr_fb[curVtx - rowLeft] = my_pr;
+  }
 }
 
 /*static*/
@@ -127,75 +137,17 @@ void pull_app_task_impl(const Task *task,
   Vertex* new_pr = acc_new_pr.ptr(rect_new_pr);
   V_ID rowLeft = rect_row_ptr.lo[0], rowRight = rect_row_ptr.hi[0];
   E_ID colLeft = rect_col_idx.lo[0], colRight = rect_col_idx.hi[0];
- 
-  // int *queueNow;
-  // cudaMalloc((void**)&queueNow, 10000*sizeof(int));
-  // int *queueNext;
-  // cudaMalloc((void**)&queueNext, 10000*sizeof(int));
-  // const int n = 32;
-  // const size_t sz = size_t(n) * sizeof(int);
-  // int *dJunk;
-  // cudaMalloc((void**)&dJunk, sz);
-  // cudaMemset(dJunk, 0, sz/4);
-  // cudaMemset(dJunk, 0x12,  8);
-
-  // int *Junk = new int[n];
-
-  // cudaMemcpy(Junk, dJunk, sz, cudaMemcpyDeviceToHost);
-
-  // for(int i=0; i<n; i++) {
-  //     printf("%d %x\n", i, Junk[i]);
-  // }
-
-  int *distance;
-  cudaMalloc((void**)&distance, (piece->nv)*sizeof(int));
-  cudaMemset(distance, std::numeric_limits<int>::max(),(piece->nv));
-  cudaMemset(distance,0,1);
-  int level=0;
-
-    
-    int * d_parent,* d_currentQueue,* d_nextQueue;  
-   cudaMalloc((void * *)&d_parent,(piece->nv)* sizeof(int));
-    cudaMalloc((void * *)&d_currentQueue, (piece->nv)* sizeof(int));
-    cudaMalloc((void * *)&d_nextQueue, (piece->nv)* sizeof(int));
-    //cudaMemset(d_distance,2147483647,piece->nv);
-    //cudaMemset(d_distance,0,1);
-    cudaMemset(d_parent,std::numeric_limits<int>::max(),piece->nv);
-    cudaMemset(d_parent,0,1);
-    int firstElementQueue=0;
-    cudaMemcpy(d_currentQueue,&firstElementQueue,sizeof(int),cudaMemcpyHostToDevice);
-    //cudaMemset(d_nextQueue,0,piece->nv);
 
   load_kernel<<<GET_BLOCKS(piece->myInVtxs), CUDA_NUM_THREADS>>>(
-    piece->myInVtxs, in_vtxs, piece->oldPrFb, old_pr);    
-  int * queueSize;
-  cuMemAllocHost((void * *)&queueSize,sizeof(int));
-  *queueSize=1;
-
-  int * nextQueueSize;
-  cudaMalloc((void * *)&nextQueueSize,sizeof(int));
-  cudaMemset(nextQueueSize,0,1);
-  while(*queueSize>0)
-  {
-    pr_kernel<<<GET_BLOCKS(*queueSize),CUDA_NUM_THREADS>>>(
-        rowLeft, rowRight, colLeft, (1 - ALPHA) / piece->nv,
-        row_ptrs, col_idxs, piece->oldPrFb, piece->newPrFb,level,distance, d_parent, queueSize,nextQueueSize,d_currentQueue,d_nextQueue);
-    cudaDeviceSynchronize();
-    level=level+1;    
-    cudaMemcpy(queueSize,nextQueueSize,sizeof(int),cudaMemcpyDeviceToHost);
-    printf("level:%d queueSize:%d\n",level,*queueSize);
-    cudaMemset(nextQueueSize,0,1); 
-    std::swap(d_currentQueue, d_nextQueue);
-  }
-   int *vc=new int[piece->nv];
-   cudaMemcpy(vc,d_parent, piece->nv*sizeof(int), cudaMemcpyDeviceToHost);
-
-  for(int i=0; i<piece->nv; i++) {
-      if(vc[i]==0)
-          printf("%d %d\n", i, vc[i]);
-  }
+      piece->myInVtxs, in_vtxs, piece->oldPrFb, old_pr);     
+  pr_kernel<<<GET_BLOCKS(rowRight - rowLeft + 1), CUDA_NUM_THREADS>>>(
+      rowLeft, rowRight, colLeft, (1 - ALPHA) / piece->nv,
+      row_ptrs, col_idxs, piece->oldPrFb, piece->newPrFb);
   // Need to copy results back to new_pr
-  //checkCUDA(cudaMemcpy(new_pr, piece->newPrFb,    (rowRight - rowLeft + 1) * sizeof(Vertex),  cudaMemcpyDeviceToHost));
+  cudaDeviceSynchronize();
+  checkCUDA(cudaMemcpy(new_pr, piece->newPrFb,
+            (rowRight - rowLeft + 1) * sizeof(Vertex),
+            cudaMemcpyDeviceToHost));
 }
 
 __global__
@@ -221,8 +173,8 @@ void init_kernel(V_ID rowLeft,
       row_ptrs[n].degree = degrees[n];
     for (E_ID e = startColIdx; e < endColIdx; e++)
     {
-      col_idxs[e - colLeft].dst = raw_cols[e - colLeft];
-      col_idxs[e - colLeft].src = n + rowLeft;
+      col_idxs[e - colLeft].src = raw_cols[e - colLeft];
+      col_idxs[e - colLeft].dst = n + rowLeft;
     }
   }
 }
