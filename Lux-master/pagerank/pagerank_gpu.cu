@@ -105,7 +105,7 @@ void pull_app_task_impl(const Task *task,
   const AccessorRO<EdgeStruct, 1> acc_col_idx(regions[2], FID_DATA);
   const AccessorRO<Vertex, 1> acc_old_pr(regions[3], FID_DATA);
   const AccessorWO<Vertex, 1> acc_new_pr(regions[4], FID_DATA);
-  const AccessorWO<Vertex,1> input_lp(regions[5],FID_DATA);
+  const AccessorWO<int,1> input_lp(regions[5],FID_DATA);
 
   Rect<1> rect_row_ptr = runtime->get_index_space_domain(
                              ctx, task->regions[0].region.get_index_space());
