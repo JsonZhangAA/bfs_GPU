@@ -96,8 +96,8 @@ void pull_app_task_impl(const Task *task,
                         const std::vector<PhysicalRegion> &regions,
                         Context ctx, Runtime *runtime)
 {
-  assert(regions.size() == 5);
-  assert(task->regions.size() == 5);
+  assert(regions.size() == 6);//加了一个region
+  assert(task->regions.size() == 6);//加了一个region
   const GraphPiece *piece = (GraphPiece*) task->local_args;
 
   const AccessorRO<NodeStruct, 1> acc_row_ptr(regions[0], FID_DATA);
@@ -105,6 +105,8 @@ void pull_app_task_impl(const Task *task,
   const AccessorRO<EdgeStruct, 1> acc_col_idx(regions[2], FID_DATA);
   const AccessorRO<Vertex, 1> acc_old_pr(regions[3], FID_DATA);
   const AccessorWO<Vertex, 1> acc_new_pr(regions[4], FID_DATA);
+  const AccessorWO<vectex,1> input_lp(region[5],FID_DATA);
+
   Rect<1> rect_row_ptr = runtime->get_index_space_domain(
                              ctx, task->regions[0].region.get_index_space());
   Rect<1> rect_in_vtx = runtime->get_index_space_domain(
@@ -115,11 +117,15 @@ void pull_app_task_impl(const Task *task,
                             ctx, task->regions[3].region.get_index_space());
   Rect<1> rect_new_pr = runtime->get_index_space_domain(
                             ctx, task->regions[4].region.get_index_space());
+  Rect<1> rect_input_lp=runtime->get_index_space_domain(
+                            ctx,task->region[5].region.get_index_space());
   assert(acc_row_ptr.accessor.is_dense_arbitrary(rect_row_ptr));
   assert(acc_in_vtx.accessor.is_dense_arbitrary(rect_in_vtx));
   assert(acc_col_idx.accessor.is_dense_arbitrary(rect_col_idx));
   assert(acc_old_pr.accessor.is_dense_arbitrary(rect_old_pr));
   assert(acc_new_pr.accessor.is_dense_arbitrary(rect_new_pr));
+  assert(input_lp.accessor.is_dense_arbitrary(rect_input_lp));
+  int * input_lp_ptr=input_lp.ptr(rect_input_lp);
   const NodeStruct* row_ptrs = acc_row_ptr.ptr(rect_row_ptr);
   const V_ID* in_vtxs = acc_in_vtx.ptr(rect_in_vtx);
   const EdgeStruct* col_idxs = acc_col_idx.ptr(rect_col_idx);
@@ -153,6 +159,7 @@ void pull_app_task_impl(const Task *task,
   cudaMemset(distance,0,1);
   int level=0;
 
+ 
     
     int * d_parent,* d_currentQueue,* d_nextQueue;  
    cudaMalloc((void * *)&d_parent,(piece->nv)* sizeof(int));
@@ -191,8 +198,10 @@ void pull_app_task_impl(const Task *task,
    cudaMemcpy(vc,d_parent, piece->nv*sizeof(int), cudaMemcpyDeviceToHost);
 
   for(int i=0; i<piece->nv; i++) {
-      if(vc[i]==0)
-          printf("%d %d\n", i, vc[i]);
+      input_lp_ptr[i]=i;
+  }
+  for(int i=0;i<piece->nv;i++){
+    printf("%d\n",input_lp_ptr[i]);
   }
   // Need to copy results back to new_pr
   //checkCUDA(cudaMemcpy(new_pr, piece->newPrFb,    (rowRight - rowLeft + 1) * sizeof(Vertex),  cudaMemcpyDeviceToHost));
