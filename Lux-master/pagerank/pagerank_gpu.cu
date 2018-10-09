@@ -105,7 +105,7 @@ void pull_app_task_impl(const Task *task,
   const AccessorRO<EdgeStruct, 1> acc_col_idx(regions[2], FID_DATA);
   const AccessorRO<Vertex, 1> acc_old_pr(regions[3], FID_DATA);
   const AccessorWO<Vertex, 1> acc_new_pr(regions[4], FID_DATA);
-  const AccessorWO<vectex,1> input_lp(region[5],FID_DATA);
+  const AccessorWO<vertex,1> input_lp(regions[5],FID_DATA);
 
   Rect<1> rect_row_ptr = runtime->get_index_space_domain(
                              ctx, task->regions[0].region.get_index_space());
@@ -118,7 +118,7 @@ void pull_app_task_impl(const Task *task,
   Rect<1> rect_new_pr = runtime->get_index_space_domain(
                             ctx, task->regions[4].region.get_index_space());
   Rect<1> rect_input_lp=runtime->get_index_space_domain(
-                            ctx,task->region[5].region.get_index_space());
+                            ctx,task->regions[5].region.get_index_space());
   assert(acc_row_ptr.accessor.is_dense_arbitrary(rect_row_ptr));
   assert(acc_in_vtx.accessor.is_dense_arbitrary(rect_in_vtx));
   assert(acc_col_idx.accessor.is_dense_arbitrary(rect_col_idx));
