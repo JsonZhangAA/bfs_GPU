@@ -22,20 +22,25 @@
 // Use 1024 threads per block, which requires cuda sm_2x or above
 const int CUDA_NUM_THREADS = 512;
 const int BLOCK_SIZE_LIMIT = 32768;
-
 // CUDA: number of blocks for threads.
 inline int GET_BLOCKS(const int N)
 {
   int ret = (N + CUDA_NUM_THREADS - 1) / CUDA_NUM_THREADS;
   return (ret > BLOCK_SIZE_LIMIT) ? BLOCK_SIZE_LIMIT : ret;
 }
+/*  global
+void check_queue()
+{
 
+}*/
 __global__
 void load_kernel(V_ID my_in_vtxs,
                  const V_ID* in_vtxs,
                  Vertex* old_pr_fb,
-                 const Vertex* old_pr_zc)
+                 const Vertex* old_pr_zc,V_ID * d_currentQueue,int totalNum)
 {
+  d_currentQueue[0]=0;
+//  d_parent[0]=INT_MAX;
   for (V_ID i = blockIdx.x * blockDim.x + threadIdx.x; i < my_in_vtxs;
        i+= blockDim.x * gridDim.x)
   {
@@ -53,7 +58,7 @@ void pr_kernel(V_ID rowLeft,
                const NodeStruct* row_ptrs,
                const EdgeStruct* col_idxs,
                Vertex* old_pr_fb,
-               Vertex* new_pr_fb,int level,int *distance, int *d_parent,int *  queueSize, int *nextQueueSize, int *d_currentQueue, int *d_nextQueue)
+               Vertex* new_pr_fb,int level,V_ID *distance, V_ID *d_parent,int *  queueSize,int * nextQueueSize, V_ID *d_currentQueue, V_ID *d_nextQueue)
 {
   typedef cub::BlockScan<E_ID, CUDA_NUM_THREADS> BlockScan;
   __shared__ BlockScan::TempStorage temp_storage;
@@ -61,28 +66,40 @@ void pr_kernel(V_ID rowLeft,
   //__shared__ float pr[CUDA_NUM_THREADS];
   __shared__ E_ID blkColStart;
     V_ID curVtx = blockIdx.x*blockDim.x+threadIdx.x;
-    if(curVtx <=*queueSize) 
+    if(curVtx <*queueSize) 
     {
-      int valueChange=0;
+      //int valueChange=0;
+ //     printf("curVtx:%d\n",curVtx);
       int u=d_currentQueue[curVtx];
+     /* if(level==0)
+          printf("u:%d\n",u);*/
+//      printf("row_ptrs[u].index:%d\n",row_ptrs[u].index);
       {
-         
+          //int cc=0;
           int i=0;
           if(u==0)
             i=0;
           else
-            i=row_ptrs[u-1].index;  
+            i=row_ptrs[u-1].index;
           for (; i < row_ptrs[u].index; i++) 
           {  
           
               EdgeStruct es = col_idxs[i];
               int v=es.dst;
+             // printf("v:%d\n",v);
+             /*if(level==0){
+                  printf("level%d u:%d distance[%d]:%d\n",level,u,v,distance[v]);
+             }*/
+//              printf("atomicMin(&distance[v], level + 1) == INT_MAX: %d\n",atomicMin(&distance[v], level + 1) == INT_MAX);
               if(distance[v] == INT_MAX && atomicMin(&distance[v], level + 1) == INT_MAX)
              {
-                  d_parent[v]=i;
+                 /* if(level==0)
+                      printf("v:%d come in\n",v);*/
+                  //d_parent[v]=u;
+                  /*if(level==0)
+                      printf("after come in d_parent[%d]:%d\n",v,d_parent[v]);*/
                   int position=atomicAdd(nextQueueSize,1);
                   d_nextQueue[position]=v;
-                  valueChange = 1;
               }
              
           }
@@ -90,14 +107,15 @@ void pr_kernel(V_ID rowLeft,
     }
     __syncthreads();
 }
-
+//__device__ __managed_ int  nextQueueSize;
+//device__ __managed__ int nextQueueSize;
 /*static*/
 void pull_app_task_impl(const Task *task,
                         const std::vector<PhysicalRegion> &regions,
                         Context ctx, Runtime *runtime)
 {
-  assert(regions.size() == 6);//加了一个region
-  assert(task->regions.size() == 6);//加了一个region
+  assert(regions.size() == 9);//加了一个region
+  assert(task->regions.size() == 9);//加了一个region
   const GraphPiece *piece = (GraphPiece*) task->local_args;
 
   const AccessorRO<NodeStruct, 1> acc_row_ptr(regions[0], FID_DATA);
@@ -105,7 +123,10 @@ void pull_app_task_impl(const Task *task,
   const AccessorRO<EdgeStruct, 1> acc_col_idx(regions[2], FID_DATA);
   const AccessorRO<Vertex, 1> acc_old_pr(regions[3], FID_DATA);
   const AccessorWO<Vertex, 1> acc_new_pr(regions[4], FID_DATA);
-  const AccessorWO<int,1> input_lp(regions[5],FID_DATA);
+  const AccessorRW<V_ID, 1> acc_input_lp(regions[5],FID_DATA);
+  const AccessorRW<V_ID, 1> acc_d_distance_lp(regions[6],FID_DATA);
+  const AccessorWO<V_ID, 1> acc_d_currentQueue_lp(regions[7],FID_DATA);
+  const AccessorWO<V_ID, 1> acc_d_nextQueue_lp(regions[8],FID_DATA);
 
   Rect<1> rect_row_ptr = runtime->get_index_space_domain(
                              ctx, task->regions[0].region.get_index_space());
@@ -119,13 +140,25 @@ void pull_app_task_impl(const Task *task,
                             ctx, task->regions[4].region.get_index_space());
   Rect<1> rect_input_lp=runtime->get_index_space_domain(
                             ctx,task->regions[5].region.get_index_space());
+  Rect<1> rect_d_distance_lp=runtime->get_index_space_domain(
+                            ctx,task->regions[6].region.get_index_space());
+  Rect<1> rect_d_currentQueue_lp=runtime->get_index_space_domain(
+                            ctx,task->regions[7].region.get_index_space());
+  Rect<1> rect_d_nextQueue_lp=runtime->get_index_space_domain(
+                            ctx,task->regions[8].region.get_index_space());
   assert(acc_row_ptr.accessor.is_dense_arbitrary(rect_row_ptr));
   assert(acc_in_vtx.accessor.is_dense_arbitrary(rect_in_vtx));
   assert(acc_col_idx.accessor.is_dense_arbitrary(rect_col_idx));
   assert(acc_old_pr.accessor.is_dense_arbitrary(rect_old_pr));
   assert(acc_new_pr.accessor.is_dense_arbitrary(rect_new_pr));
-  assert(input_lp.accessor.is_dense_arbitrary(rect_input_lp));
-  int * input_lp_ptr=input_lp.ptr(rect_input_lp);
+  assert(acc_input_lp.accessor.is_dense_arbitrary(rect_input_lp));
+  assert(acc_d_distance_lp.accessor.is_dense_arbitrary(rect_d_distance_lp));
+  assert(acc_d_currentQueue_lp.accessor.is_dense_arbitrary(rect_d_currentQueue_lp));
+  assert(acc_d_nextQueue_lp.accessor.is_dense_arbitrary(rect_d_nextQueue_lp));
+  V_ID * input_lp_ptr=acc_input_lp.ptr(rect_input_lp);
+  V_ID * d_distance_ptr=acc_d_distance_lp.ptr(rect_d_distance_lp);
+  V_ID * d_currentQueue_ptr=acc_d_currentQueue_lp.ptr(rect_d_currentQueue_lp);
+  V_ID * d_nextQueue_ptr=acc_d_nextQueue_lp.ptr(rect_d_nextQueue_lp);
   const NodeStruct* row_ptrs = acc_row_ptr.ptr(rect_row_ptr);
   const V_ID* in_vtxs = acc_in_vtx.ptr(rect_in_vtx);
   const EdgeStruct* col_idxs = acc_col_idx.ptr(rect_col_idx);
@@ -153,58 +186,81 @@ void pull_app_task_impl(const Task *task,
   //     printf("%d %x\n", i, Junk[i]);
   // }
 
-  int *distance;
+  /*int *distance;//利用d_distance_ptr取代distance
   cudaMalloc((void**)&distance, (piece->nv)*sizeof(int));
   cudaMemset(distance, std::numeric_limits<int>::max(),(piece->nv));
-  cudaMemset(distance,0,1);
+  cudaMemset(distance,0,1);*/
   int level=0;
-
+  //printf("nextQueueSize:%d\n",nextQueueSize);
  
     
-    int * d_parent,* d_currentQueue,* d_nextQueue;  
-   cudaMalloc((void * *)&d_parent,(piece->nv)* sizeof(int));
-    cudaMalloc((void * *)&d_currentQueue, (piece->nv)* sizeof(int));
-    cudaMalloc((void * *)&d_nextQueue, (piece->nv)* sizeof(int));
+   // int * d_currentQueue,* d_nextQueue;  //分别使用d_currentQueue_pt和d_nextQueue_ptr来取代。
+   //cudaMalloc((void * *)&d_parent,(piece->nv)* sizeof(int));//利用input_ptr取代d_parent
+//    cudaMalloc((void * *)&d_currentQueue, (piece->nv)* sizeof(int));
+//    cudaMalloc((void * *)&d_nextQueue, (piece->nv)* sizeof(int));
     //cudaMemset(d_distance,2147483647,piece->nv);
     //cudaMemset(d_distance,0,1);
-    cudaMemset(d_parent,std::numeric_limits<int>::max(),piece->nv);
-    cudaMemset(d_parent,0,1);
-    int firstElementQueue=0;
-    cudaMemcpy(d_currentQueue,&firstElementQueue,sizeof(int),cudaMemcpyHostToDevice);
+    //cudaMemset(d_parent,std::numeric_limits<int>::max(),piece->nv);
+    //cudaMemset(d_parent,0,1);
+//    int firstElementQueue=0;
+//    cudaMemcpy(d_currentQueue,&firstElementQueue,sizeof(int),cudaMemcpyHostToDevice);
     //cudaMemset(d_nextQueue,0,piece->nv);
-
-  load_kernel<<<GET_BLOCKS(piece->myInVtxs), CUDA_NUM_THREADS>>>(
-    piece->myInVtxs, in_vtxs, piece->oldPrFb, old_pr);    
+    load_kernel<<<GET_BLOCKS(piece->myInVtxs), CUDA_NUM_THREADS>>>(
+        piece->myInVtxs, in_vtxs, piece->oldPrFb, old_pr,d_currentQueue_ptr,rowRight);
+  /*{
+    printf("before bfs: ");
+    int *vc=new int[piece->nv];
+    cudaMemcpy(vc,input_lp_ptr, piece->nv*sizeof(int), cudaMemcpyDeviceToHost);
+//   printf("input_lp_ptr[0]:%i\n",*input_lp_ptr);
+    int count=0;
+    for(int i=0; i<piece->nv; i++) {
+        if(vc[i]==std::numeric_limits<int>::max())
+              count++;
+    }
+    printf("%d\n",count);
+  }*/
+  //load_kernel<<<GET_BLOCKS(piece->myInVtxs), CUDA_NUM_THREADS>>>(
+  //  piece->myInVtxs, in_vtxs, piece->oldPrFb, old_pr,input_lp_ptr);    
   int * queueSize;
-  cuMemAllocHost((void * *)&queueSize,sizeof(int));
+  cudaMallocManaged(&queueSize,sizeof(int));
   *queueSize=1;
+ // cuMemAllocHost((void * *)&queueSize,sizeof(int));
+  *queueSize=1;
+  /*int * checkQueue;
+  cuMemAllocHost((void * *)&checkQueue,sizeof(int)*(rowRight-rowLeft));    */
+
 
   int * nextQueueSize;
-  cudaMalloc((void * *)&nextQueueSize,sizeof(int));
-  cudaMemset(nextQueueSize,0,1);
+//  cudaMalloc((void * *)&nextQueueSize,sizeof(int));
+  cudaMallocManaged(&nextQueueSize,sizeof(int));
+//  cudaMemset(nextQueueSize,0,1);
+  *nextQueueSize=0;
+//  printf("row_right-row_left:%d\n",rowRight-rowLeft);
   while(*queueSize>0)
   {
     pr_kernel<<<GET_BLOCKS(*queueSize),CUDA_NUM_THREADS>>>(
         rowLeft, rowRight, colLeft, (1 - ALPHA) / piece->nv,
-        row_ptrs, col_idxs, piece->oldPrFb, piece->newPrFb,level,distance, d_parent, queueSize,nextQueueSize,d_currentQueue,d_nextQueue);
+        row_ptrs, col_idxs, piece->oldPrFb, piece->newPrFb,level,d_distance_ptr, input_lp_ptr,queueSize,nextQueueSize,d_currentQueue_ptr,d_nextQueue_ptr);
     cudaDeviceSynchronize();
-    level=level+1;    
-    cudaMemcpy(queueSize,nextQueueSize,sizeof(int),cudaMemcpyDeviceToHost);
-    printf("level:%d queueSize:%d\n",level,*queueSize);
-    cudaMemset(nextQueueSize,0,1); 
-    std::swap(d_currentQueue, d_nextQueue);
+    level=level+1;   
+    *queueSize=*nextQueueSize; 
+//    cudaMemcpy(queueSize,nextQueueSize,sizeof(int),cudaMemcpyDeviceToHost);
+     printf("level:%d queueSize:%d\n",level,*queueSize);
+  //  cudaMemset(nextQueueSize,0,1); 
+    *nextQueueSize=0;
+    std::swap(d_currentQueue_ptr, d_nextQueue_ptr);
   }
-   int *vc=new int[piece->nv];
-   cudaMemcpy(vc,d_parent, piece->nv*sizeof(int), cudaMemcpyDeviceToHost);
-
-  for(int i=0; i<piece->nv; i++) {
-      input_lp_ptr[i]=i;
-  }
-  for(int i=0;i<piece->nv;i++){
-    printf("%d\n",input_lp_ptr[i]);
-  }
-  // Need to copy results back to new_pr
-  //checkCUDA(cudaMemcpy(new_pr, piece->newPrFb,    (rowRight - rowLeft + 1) * sizeof(Vertex),  cudaMemcpyDeviceToHost));
+ /* {
+    int * val=new int[piece->nv];
+    cudaMemcpy(val,input_lp_ptr,sizeof(int)*(piece->nv),cudaMemcpyDeviceToHost);
+    int count=0;
+    for(int i=0;i<piece->nv;i++)
+    {
+        if(val[i]==1)
+            count++;
+    } 
+    printf("count:%d\n",count);
+  }*/
 }
 
 __global__

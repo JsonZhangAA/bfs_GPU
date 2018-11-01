@@ -59,7 +59,14 @@ Graph::Graph(Context ctx, HighLevelRuntime *runtime,
     runtime->attach_name(raw_col_fs, "raw_cols(V_ID)");
     FieldSpace dist_fs = runtime->create_field_space(ctx);
     runtime->attach_name(dist_fs, "out_field_space");
-
+    FieldSpace input_lp_fs=runtime->create_field_space(ctx);
+    runtime->attach_name(input_lp_fs,"input_lp_fs");
+    FieldSpace d_distance_fs=runtime->create_field_space(ctx);
+    runtime->attach_name(d_distance_fs,"d_distance_fs");
+    FieldSpace d_currentQueue_fs=runtime->create_field_space(ctx);
+    runtime->attach_name(d_currentQueue_fs,"d_currentQueue_fs");
+    FieldSpace d_nextQueue_fs=runtime->create_field_space(ctx);
+    runtime->attach_name(d_nextQueue_fs,"d_nextQueue_fs");
     // Allocate fields
     alloc_fs<NodeStruct>(ctx, runtime, row_ptr_fs);
     alloc_fs<E_ID>(ctx, runtime, raw_row_fs);
@@ -67,6 +74,10 @@ Graph::Graph(Context ctx, HighLevelRuntime *runtime,
     alloc_fs<EdgeStruct>(ctx, runtime, col_idx_fs);
     alloc_fs<V_ID>(ctx, runtime, raw_col_fs);
     alloc_fs<Vertex>(ctx, runtime, dist_fs);
+    alloc_fs<V_ID>(ctx,runtime,input_lp_fs);
+    alloc_fs<V_ID>(ctx,runtime,d_distance_fs);
+    alloc_fs<V_ID>(ctx,runtime,d_currentQueue_fs);
+    alloc_fs<V_ID>(ctx,runtime,d_nextQueue_fs);
 
     // Make logical regions
     pull_row_ptr_lr = runtime->create_logical_region(ctx, vtx_is, row_ptr_fs);
@@ -74,6 +85,10 @@ Graph::Graph(Context ctx, HighLevelRuntime *runtime,
     in_vtx_lr = runtime->create_logical_region(ctx, edge_is, in_vtx_fs);
     pull_col_idx_lr = runtime->create_logical_region(ctx, edge_is, col_idx_fs);
     raw_col_lr = runtime->create_logical_region(ctx, edge_is, raw_col_fs);
+    input_lp_lr=runtime->create_logical_region(ctx,vtx_is,input_lp_fs);
+    d_distance_lr=runtime->create_logical_region(ctx,vtx_is,d_distance_fs);
+    d_currentQueue_lr=runtime->create_logical_region(ctx,vtx_is,d_currentQueue_fs);
+    d_nextQueue_lr=runtime->create_logical_region(ctx,vtx_is,d_nextQueue_fs);
     for (int i = 0; i < 2; i++)
     {
       dist_lr[i] = runtime->create_logical_region(ctx, vtx_is, dist_fs);
@@ -147,6 +162,10 @@ Graph::Graph(Context ctx, HighLevelRuntime *runtime,
                                         pvt_vtx_coloring, true);
     pull_row_ptr_lp = runtime->get_logical_partition(ctx, pull_row_ptr_lr, vtx_ip);
     raw_row_lp = runtime->get_logical_partition(ctx, raw_row_lr, vtx_ip);
+    input_lp=runtime->get_logical_partition(ctx,input_lp_lr,vtx_ip);
+    d_distance_lp=runtime->get_logical_partition(ctx,d_distance_lr,vtx_ip);
+    d_currentQueue_lp=runtime->get_logical_partition(ctx,d_currentQueue_lr,vtx_ip);
+    d_nextQueue_lp=runtime->get_logical_partition(ctx,d_nextQueue_lr,vtx_ip);
     for (int i = 0; i < 2; i++)
     {
       dist_lp[i] = runtime->get_logical_partition(ctx, dist_lr[i], vtx_ip);
@@ -244,6 +263,36 @@ PullScanTask::PullScanTask(const Graph &graph)
     rr.add_field(FID_DATA);
     add_region_requirement(rr);
   }
+  //region[2]: input_lr
+  {
+    RegionRequirement rr(graph.input_lp_lr,WRITE_ONLY,EXCLUSIVE,graph.input_lp_lr,MAP_TO_ZC_MEMORY); 
+    rr.add_field(FID_DATA);
+    add_region_requirement(rr);
+  }
+ //region[3]:d_distance
+  {
+    RegionRequirement rr(graph.d_distance_lr,WRITE_ONLY,EXCLUSIVE,graph.d_distance_lr,MAP_TO_ZC_MEMORY);
+    rr.add_field(FID_DATA);
+    add_region_requirement(rr);
+  }
+ //region[4]:d_currentQueue
+  {
+    RegionRequirement rr(graph.d_currentQueue_lr,0,WRITE_ONLY,EXCLUSIVE,graph.d_currentQueue_lr,MAP_TO_ZC_MEMORY);
+    rr.add_field(FID_DATA);
+    add_region_requirement(rr);
+  }
+  //region[5]:d_nextQueue
+  {
+    RegionRequirement rr(graph.d_nextQueue_lr,0,WRITE_ONLY,EXCLUSIVE,graph.d_nextQueue_lr,MAP_TO_ZC_MEMORY);
+    rr.add_field(FID_DATA);
+    add_region_requirement(rr);
+  }
+  //region[3]:d_distance_lr
+  /*{
+    RegionRequirement rr(graph.d_distance_lr,WRITE_ONLY,EXCLUSIVE,graph.d_distance_lr,MAP_TO_ZC_MEMORY);
+    rr.add_field(FID_DATA);
+    add_region_requirement(rr);
+  }*/
 }
                    
 void pull_load_task_impl(const Task *task,
@@ -319,26 +368,62 @@ void pull_scan_task_impl(const Task *task,
                          const std::vector<PhysicalRegion> &regions,
                          Context ctx, Runtime* runtime)
 {
-  assert(regions.size() == 2);
-  assert(regions.size() == 2);
+  assert(regions.size() == 6);
+  assert(regions.size() == 6);
   const AccessorWO<V_ID, 1> acc_degrees(regions[0], FID_DATA);
   const AccessorRO<V_ID, 1> acc_raw_cols(regions[1], FID_DATA);
+  const AccessorWO<V_ID, 1> acc_d_distance(regions[3],FID_DATA);
+  const AccessorWO<V_ID, 1> acc_input_lp(regions[2],FID_DATA);
+  const AccessorWO<V_ID, 1> acc_d_currentQueue(regions[4],FID_DATA);
+  const AccessorWO<V_ID, 1> acc_d_nextQueue(regions[5],FID_DATA);
   Rect<1> rect_degrees = runtime->get_index_space_domain(
                              ctx, task->regions[0].region.get_index_space());
   Rect<1> rect_raw_cols = runtime->get_index_space_domain(
                               ctx, task->regions[1].region.get_index_space());
+ Rect<1> rect_d_distance=runtime->get_index_space_domain(
+                              ctx,task->regions[3].region.get_index_space());
+ Rect<1> rect_input_lp=runtime->get_index_space_domain(
+                             ctx,task->regions[2].region.get_index_space());
+ Rect<1> rect_d_currentQueue=runtime->get_index_space_domain(
+                             ctx,task->regions[4].region.get_index_space());
+ Rect<1> rect_d_nextQueue=runtime->get_index_space_domain(
+                             ctx,task->regions[5].region.get_index_space());
   V_ID rowLeft = rect_degrees.lo[0], rowRight = rect_degrees.hi[0];
   E_ID colLeft = rect_raw_cols.lo[0], colRight = rect_raw_cols.hi[0];
+  V_ID d_distanceLeft=rect_d_distance.lo[0], d_distanceRight=rect_d_distance.hi[0];
+  V_ID input_lpLeft=rect_input_lp.lo[0],input_lpRight=rect_input_lp.hi[0];
+  V_ID d_currentQueueLeft=rect_d_currentQueue.lo[0];
   assert(rowLeft == 0);
   assert(colLeft == 0);
+  assert(d_distanceLeft==0);
   assert(acc_degrees.accessor.is_dense_arbitrary(rect_degrees));
   assert(acc_raw_cols.accessor.is_dense_arbitrary(rect_raw_cols));
+  assert(acc_d_distance.accessor.is_dense_arbitrary(rect_d_distance));
+  assert(acc_input_lp.accessor.is_dense_arbitrary(rect_input_lp));
+  assert(acc_d_currentQueue.accessor.is_dense_arbitrary(rect_d_currentQueue));
+  assert(acc_d_nextQueue.accessor.is_dense_arbitrary(rect_d_nextQueue));
   V_ID* degrees = acc_degrees.ptr(rect_degrees.lo);
+  V_ID* d_distance=acc_d_distance.ptr(rect_d_distance.lo);
+  V_ID* input_lp=acc_input_lp.ptr(rect_input_lp.lo);
+  V_ID* d_currentQueue=acc_d_currentQueue.ptr(rect_d_currentQueue.lo);
+  V_ID* d_nextQueue=acc_d_nextQueue.ptr(rect_d_nextQueue.lo);
   const V_ID* raw_cols = acc_raw_cols.ptr(rect_raw_cols.lo);
   for (V_ID n = rowLeft; n <= rowRight; n++)
     degrees[n] = 0;
   for (E_ID e = colLeft; e <= colRight; e++)
     degrees[raw_cols[e]] ++;
+  for(V_ID s=d_distanceLeft;s<=d_distanceRight;s++){
+    d_distance[s]=std::numeric_limits<int>::max();
+//    input_lp[s]=std::numeric_limits<int>::max();
+    //d_currentQueue[s]=0;
+    //d_nextQueue[s]=0;
+  }
+  for(V_ID s=input_lpLeft;s<=input_lpRight;s++){
+    //input_lp[s]=std::numeric_limits<int>::max();
+  }
+  input_lp[input_lpLeft]=1;
+  d_currentQueue[d_currentQueueLeft]=1;
+  d_distance[d_distanceLeft]=1;
 }
 
 PullInitTask::PullInitTask(const Graph &graph,
@@ -461,6 +546,48 @@ PullAppTask::PullAppTask(const Graph &graph,
     RegionRequirement rr(graph.dist_lp[(iter+1)%2], 0/*identity*/,
                          WRITE_ONLY, EXCLUSIVE, graph.dist_lr[(iter+1)%2],
                          MAP_TO_ZC_MEMORY);
+    rr.add_field(FID_DATA);
+    add_region_requirement(rr);
+  }
+  //region[5]:input_lp
+  {
+    RegionRequirement rr(graph.input_lp,0,READ_WRITE,EXCLUSIVE,graph.input_lp_lr,MAP_TO_FB_MEMORY);
+    rr.add_field(FID_DATA);
+    add_region_requirement(rr);
+    /*Rect<1> input_lp_rect(Point<1>(0),Point<1>(nv-1));
+    IndexSpaceT<1> input_lp_is=runtime->create_index_space(ctx,input_lp_rect);
+    runtime->attach_name(input_lp_is,"input_lp_index_space");
+    FieldSpace input_lp_fs=runtime->create_field_space(ctx);
+    runtime->attach_name(input_lp_fs,"input_lp_fs");
+    alloc_fs<V_ID>(ctx,runtime,input_lp_fs);
+    input_lp_lr=runtime->create_logical_region(ctx,input_lp_is,input_lp_fs);  
+    LegionRuntime::Arrays::Rect<1> color_rect(LegionRuntime::Arrays::Point<1>(0),LegionRuntime::Arrays::Point<1>(numParts-1));
+   IndexSpace color_is=runtime->create_index_space(ctx,color_rect);
+    IndexPartition ip=runtime->create_equal_partition(ctx,input_lp_is,color_is);
+    runtime->attach_name(ip,"ip");
+    LogicalPartition input_lp=runtime->get_logical_partition(ctx,input_lr,ip);
+    runtime->attach_name(input_lp,"input_lp");
+    RegionRequirement rr(input_lp, 0,
+                         WRITE_ONLY, EXCLUSIVE, input_lp_lr,
+                         MAP_TO_FB_MEMORY);
+    rr.add_field(FID_DATA);
+    add_region_requirement(rr);*/
+  }
+  //regions[6]:d_distance
+  {
+    RegionRequirement rr(graph.d_distance_lp,0,READ_WRITE,EXCLUSIVE,graph.d_distance_lr,MAP_TO_FB_MEMORY);
+    rr.add_field(FID_DATA);
+    add_region_requirement(rr);
+  }
+  //regions[7]:d_currentQueue
+  {
+    RegionRequirement rr(graph.d_currentQueue_lp,0,WRITE_ONLY,EXCLUSIVE,graph.d_currentQueue_lr,MAP_TO_FB_MEMORY);
+    rr.add_field(FID_DATA);
+    add_region_requirement(rr);
+  }
+  //regions[8]:d_nextQueue
+  {
+    RegionRequirement rr(graph.d_nextQueue_lp,0,WRITE_ONLY,EXCLUSIVE,graph.d_nextQueue_lr,MAP_TO_FB_MEMORY);
     rr.add_field(FID_DATA);
     add_region_requirement(rr);
   }

@@ -36,13 +36,12 @@ GEN_GPU_SRC	?= pagerank_gpu.cu							# .cu files
 # You can modify these variables, some will be appended to by the runtime makefile
 INC_FLAGS	?= -I../cub -I.
 CC_FLAGS	?=
-NVCC_FLAGS	?=
+NVCC_FLAGS	?= 
 GASNET_FLAGS	?=
 LD_FLAGS	?=
 # For Point and Rect typedefs
 CC_FLAGS	+= -std=c++11
-NVCC_FLAGS	+= -std=c++11
-
+NVCC_FLAGS	+= -std=c++11 -lglut -lGL -lGLU
 ###########################################################################
 #
 #   Don't change anything below here

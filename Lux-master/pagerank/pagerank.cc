@@ -78,6 +78,7 @@ void top_level_task(const Task *task, const std::vector<PhysicalRegion> &regions
   double ts_start = Realm::Clock::current_time_in_microseconds(); 
   for (int i = 0; i < numIter; i++) {
     iteration = i;
+    //printf("iteration:%d\n",i);
     PullAppTask app_task(graph, task_is, local_args, iteration);
     fm = runtime->execute_index_space(ctx, app_task);
   }

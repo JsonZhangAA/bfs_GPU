@@ -82,6 +82,14 @@ public:
   LogicalPartition frontier_lp[2];
   LogicalRegion dist_lr[2];
   LogicalPartition dist_lp[2];
+  LogicalRegion input_lp_lr;
+  LogicalPartition input_lp;
+  LogicalRegion d_distance_lr;
+  LogicalPartition d_distance_lp;
+  LogicalRegion d_currentQueue_lr;
+  LogicalPartition d_currentQueue_lp;
+  LogicalRegion d_nextQueue_lr;
+  LogicalPartition d_nextQueue_lp;
   bool verbose;
 };
 
